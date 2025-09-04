@@ -68,14 +68,7 @@ for device in $(bashio::config 'devices|keys'); do
     if [ -n "${hardware_id}" ] && [ -z "${bus_id}" ]; then
         bashio::log.info "Resolving bus ID for hardware ID ${hardware_id} from server ${server_address}"
         if device_list=$(usbip list -r "${server_address}" 2>/dev/null); then
-            resolved_bus_id=$(echo "${device_list}" | awk -v id="${hardware_id}" '
-                match($0, "\\(" id "\\)") {
-                    split(prev, a, ":");
-                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", a[1]);
-                    print a[1];
-                }
-                { prev=$0 }
-            ' | head -n1)
+            resolved_bus_id=$(echo "${device_list}" | grep "${hardware_id}" | awk '{print substr($1, 1, length($1)-1)}')
             if [ -n "${resolved_bus_id}" ]; then
                 bus_id="${resolved_bus_id}"
                 bashio::log.info "Resolved hardware ID ${hardware_id} to bus ID ${bus_id}"
