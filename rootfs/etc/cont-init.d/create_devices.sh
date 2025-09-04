@@ -5,6 +5,7 @@ bashio::log.level "$(bashio::config 'log_level')"
 
 declare server_address
 declare bus_id
+declare hardware_id
 declare script_directory="/usr/local/bin"
 declare mount_script="/usr/local/bin/mount_devices"
 declare discovery_server_address
@@ -61,6 +62,35 @@ bashio::log.info "Iterating over configured devices."
 for device in $(bashio::config 'devices|keys'); do
     server_address=$(bashio::config "devices[${device}].server_address")
     bus_id=$(bashio::config "devices[${device}].bus_id")
+    hardware_id=$(bashio::config "devices[${device}].hardware_id")
+
+    # If hardware_id is provided and bus_id is not, resolve bus_id from server's device list
+    if [ -n "${hardware_id}" ] && [ -z "${bus_id}" ]; then
+        bashio::log.info "Resolving bus ID for hardware ID ${hardware_id} from server ${server_address}"
+        if device_list=$(usbip list -r "${server_address}" 2>/dev/null); then
+            resolved_bus_id=$(echo "${device_list}" | awk -v id="${hardware_id}" '
+                match($0, "\\(" id "\\)") {
+                    split(prev, a, ":");
+                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", a[1]);
+                    print a[1];
+                }
+                { prev=$0 }
+            ' | head -n1)
+            if [ -n "${resolved_bus_id}" ]; then
+                bus_id="${resolved_bus_id}"
+                bashio::log.info "Resolved hardware ID ${hardware_id} to bus ID ${bus_id}"
+            else
+                bashio::log.warning "Could not resolve bus ID for hardware ID ${hardware_id} on server ${server_address}"
+            fi
+        else
+            bashio::log.error "Failed to retrieve device list from server ${server_address} while resolving hardware ID ${hardware_id}"
+        fi
+    fi
+
+    if [ -z "${bus_id}" ]; then
+        bashio::log.warning "Skipping device for server ${server_address}: missing bus ID (and could not resolve from hardware ID)"
+        continue
+    fi
 
     bashio::log.info "Adding device from server ${server_address} on bus ${bus_id}"
 
