@@ -122,13 +122,8 @@ fi
     # Attach the device
     bashio::log.debug "Attaching device ${bus_id} from server ${server_address}."
     echo "/usr/sbin/usbip attach --remote=${server_address} --busid=${bus_id}" >>"${mount_script}"
-done
 
-bashio::log.info "Device configuration complete. Ready to attach devices."
-
-
-
-bashio::log "#####Raw device_list from ${server_address}:"
+    bashio::log "#####Raw device_list from ${server_address}:"
 echo "${device_list}" | while read -r l; do bashio::log "#####$l"; done
 
 # Normalize hardware_id for matching (remove non-hex, lowercase)
@@ -147,4 +142,11 @@ resolved_bus_id=$(echo "${device_list}" \
 
   bashio::log "#####Simple resolver did not find a bus ID for ${hardware_id} on ${server_address}"
   bashio::log "######You can run: usbip list -r ${server_address} locally and paste the output for further tuning."
+
+
+done
+
+bashio::log.info "Device configuration complete. Ready to attach devices."
+
+
 
