@@ -109,7 +109,7 @@ for device in $(bashio::config 'devices | keys'); do
                     }
                 }
             ')
-
+            bashio::log.info "LOOOOOooooooook HERE ############ ${resolved_bus_id}"
             # Fallback to simpler grep-based resolver if awk found nothing
             if [ -z "${resolved_bus_id}" ]; then
                 resolved_bus_id=$(echo "${device_list}" \
