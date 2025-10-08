@@ -143,5 +143,5 @@ for device in $(bashio::config 'devices | keys'); do
     bashio::log.info "Attaching device ${bus_id} from server ${server_address}."
     echo "/usr/sbin/usbip attach -r ${server_address} -b ${bus_id} >/dev/null 2>&1 || true" >>"${mount_script}"
 done
-
+ 
 bashio::log.info "Device configuration complete. Ready to attach devices."
