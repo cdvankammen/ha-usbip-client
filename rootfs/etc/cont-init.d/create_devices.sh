@@ -128,12 +128,12 @@ bashio::log.info "Device configuration complete. Ready to attach devices."
 
 
 
-bashio::log.debug "Raw device_list from ${server_address}:"
+bashio::log.debug "#####Raw device_list from ${server_address}:"
 echo "${device_list}" | while read -r l; do bashio::log.debug "$l"; done
 
 # Normalize hardware_id for matching (remove non-hex, lowercase)
 search=$(echo "${hardware_id}" | tr '[:upper:]' '[:lower:]' | sed 's/[^0-9a-f]//g')
-bashio::log.debug "Normalized hardware search term: ${search}"
+bashio::log.debug "#####Normalized hardware search term: ${search}"
 
 # Simple grep-based resolver: look for VID:PID in either "(vvvv:pppp)" or "VID_vvvv...PID_pppp" forms,
 # then take the preceding line which includes the bus id (first field)
@@ -141,10 +141,10 @@ resolved_bus_id=$(echo "${device_list}" \
   | grep -i -B1 -E "${search:0:4}[: ]*${search:4}|VID_${search:0:4}.*PID_${search:4}" \
   | head -n1 | awk '{gsub(/:$/,""); print $1}')
 
-if [ -n "${resolved_bus_id}" ]; then
+
   bus_id="${resolved_bus_id}"
-  bashio::log.info "Resolved hardware ID ${hardware_id} to bus ID ${bus_id}"
-else
-  bashio::log.warning "Simple resolver did not find a bus ID for ${hardware_id} on ${server_address}"
-  bashio::log.debug "You can run: usbip list -r ${server_address} locally and paste the output for further tuning."
-fi
+  bashio::log.info "#######Resolved hardware ID ${hardware_id} to bus ID ${bus_id}"
+
+  bashio::log.warning "#####Simple resolver did not find a bus ID for ${hardware_id} on ${server_address}"
+  bashio::log.debug "######You can run: usbip list -r ${server_address} locally and paste the output for further tuning."
+
