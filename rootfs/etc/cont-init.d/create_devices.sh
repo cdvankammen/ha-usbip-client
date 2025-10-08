@@ -64,26 +64,54 @@ for device in $(bashio::config 'devices|keys'); do
     bus_id=$(bashio::config "devices[${device}].bus_id")
     hardware_id=$(bashio::config "devices[${device}].hardware_id")
 
-    # If hardware_id is provided and bus_id is not, resolve bus_id from server's device list
     if [ -n "${hardware_id}" ] && [ -z "${bus_id}" ]; then
-        bashio::log.info "Resolving bus ID for hardware ID ${hardware_id} from server ${server_address}"
-        if device_list=$(usbip list -r "${server_address}" 2>/dev/null); then
-            resolved_bus_id=$(echo "${device_list}" | grep "${hardware_id}" | awk '{print substr($1, 1, length($1)-1)}')
-            if [ -n "${resolved_bus_id}" ]; then
-                bus_id="${resolved_bus_id}"
-                bashio::log.info "Resolved hardware ID ${hardware_id} to bus ID ${bus_id}"
-            else
-                bashio::log.warning "Could not resolve bus ID for hardware ID ${hardware_id} on server ${server_address}"
-            fi
-        else
-            bashio::log.error "Failed to retrieve device list from server ${server_address} while resolving hardware ID ${hardware_id}"
-        fi
-    fi
+    bashio::log.info "Resolving bus ID for hardware ID ${hardware_id} from server ${server_address}"
+    if device_list=$(usbip list -r "${server_address}" 2>/dev/null); then
+        # normalize search term (remove non-hex, lowercase) so "1A86:55D4" and "1a86:55d4" match
+        search=$(echo "${hardware_id}" | tr '[:upper:]' '[:lower:]' | sed 's/[^0-9a-f]//g')
 
-    if [ -z "${bus_id}" ]; then
-        bashio::log.warning "Skipping device for server ${server_address}: missing bus ID (and could not resolve from hardware ID)"
-        continue
+        resolved_bus_id=$(echo "${device_list}" | awk -v s="$search" '
+            BEGIN { IGNORECASE = 1 }
+            # capture device header lines that contain busid like "4-3:" (allow leading spaces and optional "-")
+            /^[[:space:]]*[0-9]+([-.0-9])*:/ {
+                bid = $1
+                sub(/:$/,"",bid)
+                next
+            }
+            {
+                # match parenthesized hex like (1a86:55d4)
+                if (match($0, /\([0-9a-f]{4}:[0-9a-f]{4}\)/,m)) {
+                    hid = tolower(m[0])
+                    gsub(/[()]/,"",hid)
+                    gsub(/[^0-9a-f]/,"",hid)
+                    if (hid == s) { print bid; exit }
+                }
+                # match USB\VID_xxxx&PID_yyyy\ style
+                if (match($0, /USB\\VID_[0-9A-F]{4}&PID_[0-9A-F]{4}/,m2)) {
+                    line = tolower(m2[0])
+                    if (match(line, /vid_([0-9a-f]{4})&pid_([0-9a-f]{4})/, parts)) {
+                        hid = parts[1] parts[2]
+                        if (hid == s) { print bid; exit }
+                    }
+                }
+            }
+        ')
+        if [ -n "${resolved_bus_id}" ]; then
+            bus_id="${resolved_bus_id}"
+            bashio::log.info "Resolved hardware ID ${hardware_id} to bus ID ${bus_id}"
+        else
+            bashio::log.warning "Could not resolve bus ID for hardware ID ${hardware_id} on server ${server_address}"
+        fi
+    else
+        bashio::log.error "Failed to retrieve device list from server ${server_address} while resolving hardware ID ${hardware_id}"
     fi
+fi
+
+if [ -z "${bus_id}" ]; then
+    bashio::log.warning "Skipping device for server ${server_address}: missing bus ID (and could not resolve from hardware ID)"
+    continue
+fi
+
 
     bashio::log.info "Adding device from server ${server_address} on bus ${bus_id}"
 
