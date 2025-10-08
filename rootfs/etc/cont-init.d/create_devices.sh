@@ -66,7 +66,7 @@ for device in $(bashio::config 'devices|keys'); do
 
     if [ -n "${hardware_id}" ] && [ -z "${bus_id}" ]; then
     bashio::log.info "Resolving bus ID for hardware ID ${hardware_id} from server ${server_address}"
-    if device_list=$(usbip list -r "${server_address}" 2>/dev/null); then
+    if device_list=$(usbip list -r "${server_address}"); then
         # normalize search term (remove non-hex, lowercase) so "1A86:55D4" and "1a86:55d4" match
         search=$(echo "${hardware_id}" | tr '[:upper:]' '[:lower:]' | sed 's/[^0-9a-f]//g')
 
