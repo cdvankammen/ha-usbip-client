@@ -1,15 +1,18 @@
 #!/command/with-contenv bashio
 # shellcheck disable=SC1008
+# Based on your original run script with minimal added functions:
+# - collects BUSIDs from /data/options.json or mount_devices
+# - provides simple is_attached and attempt_attach functions
+# - monitors and retries attachment in a simple loop
+set -euo pipefail
+
 bashio::config.require 'log_level'
 bashio::log.level "$(bashio::config 'log_level')"
 
 bashio::log.info "running the code you put in here yourself"
-# exec /etc/cont-init.d/usbip-auto-attach.sh
-
-
 bashio::log.info "Starting USB/IP devices attachment process."
 
-# Run the attach device script
+# Run the attach device script (one-shot)
 bashio::log.info "Running the mount_devices script."
 if /usr/local/bin/mount_devices; then
     bashio::log.info "USB/IP devices attached successfully."
@@ -32,6 +35,91 @@ else
     bashio::log.error "Failed to attach USB/IP devices. Is the USB/IP server online and device(s) USB attached?"
 fi
 
-# Keep the service running
-bashio::log.info "Keeping service alive."
-exec sleep infinity
+# -------------------------
+# Minimal helper functions
+# -------------------------
+
+USBIP_BIN="$(command -v usbip 2>/dev/null || true)"
+if [ -z "${USBIP_BIN}" ]; then
+  bashio::log.error "usbip binary not found in PATH; monitoring disabled."
+  exec sleep infinity
+fi
+
+log()  { bashio::log.info "$*"; }
+warn() { bashio::log.warning "$*"; }
+err()  { bashio::log.error "$*"; }
+
+# Get BUSIDs from /data/options.json or fallback to parsing mount_devices script
+get_busids() {
+  local line
+  local -a ids=()
+  if [ -f /data/options.json ]; then
+    # Collect all configured devices[*].bus_id
+    mapfile -t ids < <(jq -r '.devices[]?.bus_id // empty' /data/options.json 2>/dev/null || true)
+  fi
+  if [ "${#ids[@]}" -eq 0 ] && [ -f /usr/local/bin/mount_devices ]; then
+    # Fallback: parse mount_devices for --busid= tokens
+    mapfile -t ids < <(grep -oE -- '--busid=[0-9.-]+' /usr/local/bin/mount_devices | sed 's/--busid=//')
+  fi
+  printf '%s\n' "${ids[@]:-}"
+}
+
+# Return 0 if busid is present in usbip port output
+is_attached() {
+  local busid="$1"
+  "${USBIP_BIN}" port 2>/dev/null | grep -F -- "${busid}" >/dev/null 2>&1
+}
+
+# Attempt one attach for busid using discovery_server_address from options.json
+attempt_attach() {
+  local busid="$1"
+  local server
+  server="$(jq -r '.discovery_server_address // empty' /data/options.json 2>/dev/null || true)"
+  if [ -z "$server" ]; then
+    warn "No discovery_server_address in /data/options.json; cannot attach ${busid}"
+    return 2
+  fi
+  log "Attempting attach ${busid} from ${server}"
+  if "${USBIP_BIN}" attach -r "${server}" -b "${busid}" 2>&1 | tee /dev/stderr | grep -q -E "success|attached|already attached"; then
+    if is_attached "${busid}"; then
+      log "Attach confirmed for ${busid}"
+      return 0
+    else
+      warn "Attach reported success but ${busid} not present in local ports"
+      return 1
+    fi
+  else
+    warn "usbip attach failed for ${busid}"
+    return 1
+  fi
+}
+
+# -------------------------
+# Simple monitor loop
+# -------------------------
+
+CHECK_INTERVAL="${CHECK_INTERVAL:-5}"  # seconds between checks
+
+mapfile -t BUSIDS < <(get_busids)
+if [ "${#BUSIDS[@]}" -eq 0 ]; then
+  bashio::log.warning "No BUSIDs configured or discovered. Monitoring will do nothing."
+  exec sleep infinity
+fi
+
+log "Monitoring BUSIDs: ${BUSIDS[*]} (check every ${CHECK_INTERVAL}s)"
+
+while true; do
+  for busid in "${BUSIDS[@]}"; do
+    if is_attached "${busid}"; then
+      # attached, nothing to do
+      continue
+    fi
+    log "BUSID ${busid} not attached — attempting reattach"
+    if attempt_attach "${busid}"; then
+      log "Reattach successful for ${busid}"
+    else
+      warn "Reattach attempt failed for ${busid}; will try again on next loop"
+    fi
+  done
+  sleep "${CHECK_INTERVAL}"
+done
