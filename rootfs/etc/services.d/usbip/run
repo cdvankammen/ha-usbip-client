@@ -4,7 +4,7 @@ bashio::config.require 'log_level'
 bashio::log.level "$(bashio::config 'log_level')"
 
 bashio::log.info "running the code you put in here yourself"
-#exec /etc/cont-init.d/usbip-auto-attach.sh
+# exec /etc/cont-init.d/usbip-auto-attach.sh
 
 
 bashio::log.info "Starting USB/IP devices attachment process."
