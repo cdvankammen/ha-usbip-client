@@ -1,9 +1,9 @@
 #!/command/with-contenv bashio
 # shellcheck disable=SC1008
-# Multi-server-aware usbip attach + monitor script
-# - keeps your original mount_devices one-shot
-# - supports per-device server entries named server_address or discovery_server_address
-# - probes servers to find which one actually exports each BUSID before attaching
+# Based on your original run script with minimal added functions:
+# - collects BUSIDs from /data/options.json or mount_devices
+# - provides simple is_attached and attempt_attach functions
+# - monitors and retries attachment in a simple loop
 set -euo pipefail
 
 bashio::config.require 'log_level'
@@ -36,7 +36,7 @@ else
 fi
 
 # -------------------------
-# Minimal helper functions (multi-server support + probing)
+# Minimal helper functions
 # -------------------------
 
 USBIP_BIN="$(command -v usbip 2>/dev/null || true)"
@@ -49,182 +49,77 @@ log()  { bashio::log.info "$*"; }
 warn() { bashio::log.warning "$*"; }
 err()  { bashio::log.error "$*"; }
 
-# Build paired arrays: BUSIDS[index]=busid, SERVERS[index]=server (may be empty)
-BUSIDS=()
-SERVERS=()
-
-# Read per-device entries from /data/options.json; support server_address or discovery_server_address
-build_device_pairs_from_options() {
+# Get BUSIDs from /data/options.json or fallback to parsing mount_devices script
+get_busids() {
+  local line
+  local -a ids=()
   if [ -f /data/options.json ]; then
-    local count
-    count=$(jq '(.devices // []) | length' /data/options.json 2>/dev/null || echo 0)
-    if [ "${count}" -gt 0 ]; then
-      for i in $(seq 0 $((count - 1))); do
-        local bid server1 server2 server
-        bid=$(jq -r ".devices[${i}].bus_id // empty" /data/options.json 2>/dev/null || true)
-        server1=$(jq -r ".devices[${i}].server_address // empty" /data/options.json 2>/dev/null || true)
-        server2=$(jq -r ".devices[${i}].discovery_server_address // empty" /data/options.json 2>/dev/null || true)
-        # prefer explicit server_address, fall back to discovery_server_address
-        if [ -n "$server1" ]; then
-          server="$server1"
-        else
-          server="$server2"
-        fi
-        if [ -n "${bid}" ]; then
-          BUSIDS+=("${bid}")
-          SERVERS+=("${server}")
-        fi
-      done
-    fi
+    # Collect all configured devices[*].bus_id
+    mapfile -t ids < <(jq -r '.devices[]?.bus_id // empty' /data/options.json 2>/dev/null || true)
   fi
+  if [ "${#ids[@]}" -eq 0 ] && [ -f /usr/local/bin/mount_devices ]; then
+    # Fallback: parse mount_devices for --busid= tokens
+    mapfile -t ids < <(grep -oE -- '--busid=[0-9.-]+' /usr/local/bin/mount_devices | sed 's/--busid=//')
+  fi
+  printf '%s\n' "${ids[@]:-}"
 }
 
-# Fallback: parse /usr/local/bin/mount_devices for lines containing both --remote and --busid
-build_device_pairs_from_mountscript() {
-  if [ -f /usr/local/bin/mount_devices ]; then
-    while IFS= read -r line; do
-      if [[ "$line" == *"--remote="* && "$line" == *"--busid="* ]]; then
-        local ip bid
-        ip=$(echo "$line" | grep -oE -- '--remote=[0-9.]{7,15}' | sed 's/--remote=//')
-        bid=$(echo "$line" | grep -oE -- '--busid=[0-9.-]+' | sed 's/--busid=//')
-        if [ -n "$bid" ]; then
-          BUSIDS+=("${bid}")
-          SERVERS+=("${ip:-}")
-        fi
-      fi
-    done < /usr/local/bin/mount_devices
-  fi
-}
-
-# Build pairs from options first, then mount script fallback
-build_device_pairs_from_options
-if [ "${#BUSIDS[@]}" -eq 0 ]; then
-  build_device_pairs_from_mountscript
-fi
-
-# GLOBAL_SERVER fallback: support both keys at root level
-GLOBAL_SERVER=""
-if [ -f /data/options.json ]; then
-  GLOBAL_SERVER="$(jq -r '.discovery_server_address // .server_address // empty' /data/options.json 2>/dev/null || true)"
-fi
-
-# Merge candidates: unique list of servers to probe
-declare -a SERVERS_CANDIDATES=()
-# Add per-device servers
-for s in "${SERVERS[@]}"; do
-  if [ -n "${s}" ]; then SERVERS_CANDIDATES+=("${s}"); fi
-done
-# Add global server if set
-if [ -n "${GLOBAL_SERVER}" ]; then SERVERS_CANDIDATES+=("${GLOBAL_SERVER}"); fi
-# Deduplicate candidates preserving order
-if [ "${#SERVERS_CANDIDATES[@]}" -gt 1 ]; then
-  declare -A _seen
-  uniq_candidates=()
-  for s in "${SERVERS_CANDIDATES[@]}"; do
-    if [ -n "${s}" ] && [ -z "${_seen[${s}]:-}" ]; then
-      uniq_candidates+=("${s}")
-      _seen["${s}"]=1
-    fi
-  done
-  SERVERS_CANDIDATES=("${uniq_candidates[@]}")
-fi
-
-# If SERVERS entries are empty and GLOBAL_SERVER exists, fill per-device missing servers with GLOBAL_SERVER for attempts
-for idx in "${!BUSIDS[@]}"; do
-  if [ -z "${SERVERS[${idx}]:-}" ] && [ -n "$GLOBAL_SERVER" ]; then
-    SERVERS[${idx}]="${GLOBAL_SERVER}"
-  fi
-done
-
-if [ "${#BUSIDS[@]}" -eq 0 ]; then
-  bashio::log.warning "No BUSIDs configured or discovered. Monitoring will do nothing."
-  exec sleep infinity
-fi
-
-# remote_has_busid_on_server: Return 0 if busid is listed by usbip list -r server
-remote_has_busid_on_server() {
-  local server="$1"
-  local busid="$2"
-  "${USBIP_BIN}" list -r "${server}" 2>/dev/null | grep -F -- "${busid}" >/dev/null 2>&1
-}
-
-# Try to find the correct server for a given busid.
-# Order:
-# 1) preferred_server if provided and confirms the busid
-# 2) per-device SERVERS values
-# 3) SERVERS_CANDIDATES probe list
-# returns the server IP on stdout if found, exit non-zero otherwise
-find_server_for_busid() {
-  local busid="$1"
-  local preferred_server="$2"
-
-  if [ -n "${preferred_server}" ]; then
-    if remote_has_busid_on_server "${preferred_server}" "${busid}"; then
-      printf '%s' "${preferred_server}"
-      return 0
-    fi
-  fi
-
-  for s in "${SERVERS[@]}"; do
-    if [ -n "${s}" ] && remote_has_busid_on_server "${s}" "${busid}"; then
-      printf '%s' "${s}"
-      return 0
-    fi
-  done
-
-  for s in "${SERVERS_CANDIDATES[@]}"; do
-    if [ -n "${s}" ] && remote_has_busid_on_server "${s}" "${busid}"; then
-      printf '%s' "${s}"
-      return 0
-    fi
-  done
-
-  return 1
-}
-
-# Return 0 if busid is present in local usbip ports
-is_attached_locally() {
+# Return 0 if busid is present in usbip port output
+is_attached() {
   local busid="$1"
   "${USBIP_BIN}" port 2>/dev/null | grep -F -- "${busid}" >/dev/null 2>&1
 }
 
-# Attempt attach using the best server discovered for this busid
-attempt_attach_with_server() {
+# Attempt one attach for busid using discovery_server_address from options.json
+attempt_attach() {
   local busid="$1"
-  local preferred_server="$2"
-
-  local chosen_server
-  if ! chosen_server="$(find_server_for_busid "${busid}" "${preferred_server}" 2>/dev/null)"; then
-    warn "Could not locate server exporting ${busid}; tried preferred='${preferred_server}' and candidates='${SERVERS_CANDIDATES[*]}'."
+  local server
+  server="$(jq -r '.discovery_server_address // empty' /data/options.json 2>/dev/null || true)"
+  if [ -z "$server" ]; then
+    warn "No discovery_server_address in /data/options.json; cannot attach ${busid}"
     return 2
   fi
-
-  log "Chosen server ${chosen_server} for attach of ${busid}"
-  if "${USBIP_BIN}" attach -r "${chosen_server}" -b "${busid}" 2>&1 | tee /dev/stderr | grep -q -E "success|attached|already attached"; then
-    if is_attached_locally "${busid}"; then
-      log "Attach confirmed for ${busid} (server ${chosen_server})"
+  log "Attempting attach ${busid} from ${server}"
+  if "${USBIP_BIN}" attach -r "${server}" -b "${busid}" 2>&1 | tee /dev/stderr | grep -q -E "success|attached|already attached"; then
+    if is_attached "${busid}"; then
+      log "Attach confirmed for ${busid}"
       return 0
     else
-      warn "Attach reported success but ${busid} not present in local ports after attempting ${chosen_server}"
+      warn "Attach reported success but ${busid} not present in local ports"
       return 1
     fi
   else
-    warn "usbip attach failed for ${busid} from ${chosen_server}"
+    warn "usbip attach failed for ${busid}"
     return 1
   fi
 }
 
 # -------------------------
-# Simple monitor loop (uses paired arrays)
+# Simple monitor loop
 # -------------------------
 
 CHECK_INTERVAL="${CHECK_INTERVAL:-5}"  # seconds between checks
-log "Monitoring ${#BUSIDS[@]} devices (check every ${CHECK_INTERVAL}s)"
 
-# show pairs in log
-for i in "${!BUSIDS[@]}"; do
-  log "Device ${i}: Bus ID=${BUSIDS[$i]} Server=${SERVERS[$i]:-<none>}"
-done
-log "Server probe candidates: ${SERVERS_CANDIDATES[*]:-<none>}"
+mapfile -t BUSIDS < <(get_busids)
+if [ "${#BUSIDS[@]}" -eq 0 ]; then
+  bashio::log.warning "No BUSIDs configured or discovered. Monitoring will do nothing."
+  exec sleep infinity
+fi
+
+log "Monitoring BUSIDs: ${BUSIDS[*]} (check every ${CHECK_INTERVAL}s)"
 
 while true; do
+  for busid in "${BUSIDS[@]}"; do
+    if is_attached "${busid}"; then
+      # attached, nothing to do
+      continue
+    fi
+    log "BUSID ${busid} not attached — attempting reattach"
+    if attempt_attach "${busid}"; then
+      log "Reattach successful for ${busid}"
+    else
+      warn "Reattach attempt failed for ${busid}; will try again on next loop"
+    fi
+  done
+  sleep "${CHECK_INTERVAL}"
+done
