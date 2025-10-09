@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# cont-init hook for HA add-on (s6-overlay cont-init)
+# Exports add-on options to environment and starts the watcher under s6 background
+set -euo pipefail
+
+# read values from add-on config (Supervisor injects config as /data/options.json)
+if [ -f /data/options.json ]; then
+  SERVER="$(jq -r '.discovery_server_address // empty' /data/options.json)"
+  # pick first device if present by default, but the watcher can be instantiated per-device via service dir
+  BUSID="$(jq -r '.devices[0].bus_id // empty' /data/options.json)"
+  export SERVER BUSID
+fi
+
+# ensure executable
+chmod +x /usr/local/bin/usbip-auto-attach.sh
+
+# start the watcher in background supervised by s6, create a simple run script for svc if needed
+# create an s6 service dir so the process is supervised
+SVC_DIR="/var/run/s6-supervise-usbip-1"
+mkdir -p "${SVC_DIR}"
+cat > "${SVC_DIR}/run" <<'EOF'
+#!/usr/bin/env bash
+exec /usr/local/bin/usbip-auto-attach.sh
+EOF
+chmod +x "${SVC_DIR}/run"
+
+# start the supervised process using s6-svscanctl if available, otherwise background it
+if command -v s6-svscanctl >/dev/null 2>&1 && command -v s6-svc >/dev/null 2>&1; then
+  # if running under s6-overlay, link service dir into /etc/services.d or use s6-svc to manage it
+  mkdir -p /etc/services.d/usbip-auto-attach
+  cp -a "${SVC_DIR}/run" /etc/services.d/usbip-auto-attach/run
+else
+  # fallback: background start (still visible in container logs)
+  /usr/local/bin/usbip-auto-attach.sh &>/proc/1/fd/1 &
+fi
