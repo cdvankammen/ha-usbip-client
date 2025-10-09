@@ -1,9 +1,7 @@
 #!/command/with-contenv bashio
 # shellcheck disable=SC1008
-# Based on your original run script with minimal added functions:
-# - collects BUSIDs from /data/options.json or mount_devices
-# - provides simple is_attached and attempt_attach functions
-# - monitors and retries attachment in a simple loop
+# Based on your original run script with minimal added functions, extended to support
+# multiple discovery servers: each configured device can have its own discovery server IP.
 set -euo pipefail
 
 bashio::config.require 'log_level'
@@ -36,7 +34,7 @@ else
 fi
 
 # -------------------------
-# Minimal helper functions
+# Minimal helper functions (multi-server support)
 # -------------------------
 
 USBIP_BIN="$(command -v usbip 2>/dev/null || true)"
@@ -49,76 +47,128 @@ log()  { bashio::log.info "$*"; }
 warn() { bashio::log.warning "$*"; }
 err()  { bashio::log.error "$*"; }
 
-# Get BUSIDs from /data/options.json or fallback to parsing mount_devices script
-get_busids() {
-  local line
-  local -a ids=()
+# Build paired arrays: BUSIDS[index]=busid, SERVERS[index]=server
+# Priority: /data/options.json devices[] entries with .bus_id and optional .discovery_server_address
+# Fallback: parse /usr/local/bin/mount_devices for --remote=IP and --busid=ID on same line
+BUSIDS=()
+SERVERS=()
+
+build_device_pairs_from_options() {
   if [ -f /data/options.json ]; then
-    # Collect all configured devices[*].bus_id
-    mapfile -t ids < <(jq -r '.devices[]?.bus_id // empty' /data/options.json 2>/dev/null || true)
+    # iterate devices[] objects
+    local count
+    count=$(jq '(.devices // []) | length' /data/options.json 2>/dev/null || echo 0)
+    if [ "${count}" -gt 0 ]; then
+      for i in $(seq 0 $((count - 1))); do
+        local bid server
+        bid=$(jq -r ".devices[${i}].bus_id // empty" /data/options.json 2>/dev/null || true)
+        server=$(jq -r ".devices[${i}].discovery_server_address // empty" /data/options.json 2>/dev/null || true)
+        if [ -n "${bid}" ]; then
+          BUSIDS+=("${bid}")
+          SERVERS+=("${server}")  # may be empty; attempt_attach will handle missing server
+        fi
+      done
+    fi
   fi
-  if [ "${#ids[@]}" -eq 0 ] && [ -f /usr/local/bin/mount_devices ]; then
-    # Fallback: parse mount_devices for --busid= tokens
-    mapfile -t ids < <(grep -oE -- '--busid=[0-9.-]+' /usr/local/bin/mount_devices | sed 's/--busid=//')
-  fi
-  printf '%s\n' "${ids[@]:-}"
 }
 
-# Return 0 if busid is present in usbip port output
-is_attached() {
+build_device_pairs_from_mountscript() {
+  if [ -f /usr/local/bin/mount_devices ]; then
+    # Parse lines that include both --remote=<IP> and --busid=<ID>
+    while IFS= read -r line; do
+      if [[ "$line" == *"--remote="* && "$line" == *"--busid="* ]]; then
+        # extract remote IP and busid from the same line
+        local ip bid
+        ip=$(echo "$line" | grep -oE -- '--remote=[0-9.]{7,15}' | sed 's/--remote=//')
+        bid=$(echo "$line" | grep -oE -- '--busid=[0-9.-]+' | sed 's/--busid=//')
+        if [ -n "$bid" ]; then
+          BUSIDS+=("${bid}")
+          SERVERS+=("${ip:-}")  # ip may be empty if parsing failed
+        fi
+      fi
+    done < /usr/local/bin/mount_devices
+  fi
+}
+
+# Build pairs: options first, then mount script fallback for missing entries
+build_device_pairs_from_options
+if [ "${#BUSIDS[@]}" -eq 0 ]; then
+  build_device_pairs_from_mountscript
+fi
+
+# If devices were provided in options but server fields were empty, attempt a global discovery_server_address fallback
+GLOBAL_SERVER=""
+if [ -f /data/options.json ]; then
+  GLOBAL_SERVER="$(jq -r '.discovery_server_address // empty' /data/options.json 2>/dev/null || true)"
+fi
+# If a server is missing for a particular index, use GLOBAL_SERVER if available
+for idx in "${!BUSIDS[@]}"; do
+  if [ -z "${SERVERS[${idx}]:-}" ] && [ -n "$GLOBAL_SERVER" ]; then
+    SERVERS[${idx}]="${GLOBAL_SERVER}"
+  fi
+done
+
+if [ "${#BUSIDS[@]}" -eq 0 ]; then
+  bashio::log.warning "No BUSIDs configured or discovered. Monitoring will do nothing."
+  exec sleep infinity
+fi
+
+# Return 0 if busid is present in local usbip ports
+is_attached_locally() {
   local busid="$1"
   "${USBIP_BIN}" port 2>/dev/null | grep -F -- "${busid}" >/dev/null 2>&1
 }
 
-# Attempt one attach for busid using discovery_server_address from options.json
-attempt_attach() {
+# Attempt one attach for busid using provided server argument (may be empty)
+attempt_attach_with_server() {
   local busid="$1"
-  local server
-  server="$(jq -r '.discovery_server_address // empty' /data/options.json 2>/dev/null || true)"
+  local server="$2"
+
   if [ -z "$server" ]; then
-    warn "No discovery_server_address in /data/options.json; cannot attach ${busid}"
+    warn "No discovery server configured for ${busid}; cannot attach. Check /data/options.json"
     return 2
   fi
+
   log "Attempting attach ${busid} from ${server}"
   if "${USBIP_BIN}" attach -r "${server}" -b "${busid}" 2>&1 | tee /dev/stderr | grep -q -E "success|attached|already attached"; then
-    if is_attached "${busid}"; then
-      log "Attach confirmed for ${busid}"
+    if is_attached_locally "${busid}"; then
+      log "Attach confirmed for ${busid} (server ${server})"
       return 0
     else
       warn "Attach reported success but ${busid} not present in local ports"
       return 1
     fi
   else
-    warn "usbip attach failed for ${busid}"
+    warn "usbip attach failed for ${busid} from ${server}"
     return 1
   fi
 }
 
 # -------------------------
-# Simple monitor loop
+# Simple monitor loop (uses paired arrays)
 # -------------------------
 
 CHECK_INTERVAL="${CHECK_INTERVAL:-5}"  # seconds between checks
+log "Monitoring ${#BUSIDS[@]} devices (check every ${CHECK_INTERVAL}s)"
 
-mapfile -t BUSIDS < <(get_busids)
-if [ "${#BUSIDS[@]}" -eq 0 ]; then
-  bashio::log.warning "No BUSIDs configured or discovered. Monitoring will do nothing."
-  exec sleep infinity
-fi
-
-log "Monitoring BUSIDs: ${BUSIDS[*]} (check every ${CHECK_INTERVAL}s)"
+# show pairs in log
+for i in "${!BUSIDS[@]}"; do
+  log "Device ${i}: Bus ID=${BUSIDS[$i]} Server=${SERVERS[$i]:-<none>}"
+done
 
 while true; do
-  for busid in "${BUSIDS[@]}"; do
-    if is_attached "${busid}"; then
+  for i in "${!BUSIDS[@]}"; do
+    busid="${BUSIDS[$i]}"
+    server="${SERVERS[$i]:-}"
+    if is_attached_locally "${busid}"; then
       # attached, nothing to do
       continue
     fi
-    log "BUSID ${busid} not attached — attempting reattach"
-    if attempt_attach "${busid}"; then
-      log "Reattach successful for ${busid}"
+    log "Bus ID ${busid} not attached locally — attempting reattach from ${server:-<none>}"
+    if attempt_attach_with_server "${busid}" "${server}"; then
+      log "Reattach successful for ${busid} (server ${server})"
     else
-      warn "Reattach attempt failed for ${busid}; will try again on next loop"
+      warn "Reattach attempt failed for ${busid} (server ${server}); will retry next loop"
     fi
   done
   sleep "${CHECK_INTERVAL}"
