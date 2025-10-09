@@ -1,22 +1,41 @@
-#!/usr/bin/env bash
-# cont-init hook for HA add-on (s6-overlay cont-init)
-set -euo pipefail
+#!/command/with-contenv bashio
+# shellcheck disable=SC1008
+bashio::config.require 'log_level'
+bashio::log.level "$(bashio::config 'log_level')"
+bashio::log.info "Starting USB/IP devices attachment process."
 
-# read values from add-on config (Supervisor injects config as /data/options.json)
-if [ -f /data/options.json ]; then
-  SERVER="$(jq -r '.discovery_server_address // empty' /data/options.json)"
-  BUSID="$(jq -r '.devices[0].bus_id // empty' /data/options.json)"
-  export SERVER BUSID
-fi
-
-# ensure script is executable
-chmod +x /etc/cont-init.d/usbip-auto-attach.sh
-
-# If s6 service dir exists in image, rely on s6 supervision (service will exec this script)
-if [ -d /etc/s6/services/usbip-auto-attach ]; then
-  # nothing more to do; s6 will start the supervised service
-  true
-else
-  # fallback: start watcher in background so logs appear in container output
+# Run the auto-attach watcher (the watcher will attach devices and log status)
+bashio::log.info "Starting usbip-auto-attach watcher."
+if [ -x /etc/cont-init.d/usbip-auto-attach.sh ]; then
   /etc/cont-init.d/usbip-auto-attach.sh &>/proc/1/fd/1 &
+  sleep 1
+  bashio::log.info "usbip-auto-attach watcher started."
+else
+  bashio::log.error "usbip-auto-attach script not found or not executable at /etc/cont-init.d/usbip-auto-attach.sh"
 fi
+
+# Run the existing mount_devices behavior if present to attach devices once (preserve original flow)
+bashio::log.info "Running the mount_devices script if present."
+if /usr/local/bin/mount_devices; then
+  bashio::log.info "USB/IP devices attached successfully."
+  attached_devices=0
+  bashio::log.info "Reading the mount script for attached devices..."
+  while read -r line; do
+    if [[ "$line" == *"attach --remote="* ]]; then
+      attached_devices=$((attached_devices + 1))
+      device_info=$(echo "$line" | sed -E 's/.*--remote=([0-9.]+) --busid=([0-9.-]+)/Server IP: \1, Bus ID: \2/')
+      bashio::log.info "Attached device: ${device_info}"
+    fi
+  done < "/usr/local/bin/mount_devices"
+  if [[ $attached_devices -eq 0 ]]; then
+    bashio::log.warning "No devices were attached. Please check your configuration."
+  else
+    bashio::log.info "$attached_devices device(s) successfully attached."
+  fi
+else
+  bashio::log.error "Failed to attach USB/IP devices via mount_devices. Is the USB/IP server online and device(s) USB attached?"
+fi
+
+# Keep the service running
+bashio::log.info "Keeping service alive."
+exec sleep infinity
