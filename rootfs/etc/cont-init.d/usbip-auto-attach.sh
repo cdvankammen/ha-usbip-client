@@ -2,8 +2,18 @@
 # watcher script placed inside rootfs/etc/cont-init.d so no new folders are required
 set -euo pipefail
 
-SERVER="${SERVER:-${discovery_server_address:-192.168.1.100}}"
-BUSID="${BUSID:-${BUS_ID:-1-1.2}}"
+# runtime values: Supervisor exposes add-on options in /data/options.json
+SERVER="${SERVER:-}"
+BUSID="${BUSID:-}"
+if [ -f /data/options.json ]; then
+  SERVER="${SERVER:-$(jq -r '.discovery_server_address // empty' /data/options.json)}"
+  BUSID="${BUSID:-$(jq -r '.devices[0].bus_id // empty' /data/options.json)}"
+fi
+
+# sensible defaults if nothing provided
+SERVER="${SERVER:-192.168.1.100}"
+BUSID="${BUSID:-1-1.2}"
+
 CHECK_INTERVAL_SEC="${CHECK_INTERVAL_SEC:-5}"
 MAX_BACKOFF_SEC="${MAX_BACKOFF_SEC:-300}"
 LOG_PREFIX="[usbip-auto-attach ${BUSID}@${SERVER}]"
