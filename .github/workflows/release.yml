@@ -1,0 +1,73 @@
+name: Release
+on:
+  workflow_dispatch:
+    inputs:
+      version_increment:
+        description: 'Version increment type'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Get current version
+        id: version
+        run: |
+          current_version=$(jq -r '.version' config.yaml)
+          echo "Current version: $current_version"
+          echo "current=$current_version" >> $GITHUB_OUTPUT
+
+      - name: Bump version
+        id: bump_version
+        uses: christian-draeger/increment-semantic-version@1.1.0
+        with:
+          current-version: ${{ steps.version.outputs.current }}
+          version-fragment: ${{ github.event.inputs.version_increment }}
+
+      - name: Update version in config.yaml
+        run: |
+          NEW_VERSION="${{ steps.bump_version.outputs.next-version }}"
+          sed -i "s/version: \".*\"/version: \"$NEW_VERSION\"/" config.yaml
+
+      - name: Update CHANGELOG.md
+        uses: stefanzweifel/changelog-updater-action@v1
+        with:
+          latest-version: ${{ steps.bump_version.outputs.next-version }}
+          release-notes: |
+            ## [${{ steps.bump_version.outputs.next-version }}] - ${{ github.event.head_commit.message }}
+
+            For full changelog, see [GitHub releases](${{ github.event.repository.html_url }}/releases)
+
+      - name: Commit changes
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add config.yaml CHANGELOG.md
+          git commit -m "chore: bump version to ${{ steps.bump_version.outputs.next-version }}"
+          git tag -a "v${{ steps.bump_version.outputs.next-version }}" -m "Release v${{ steps.bump_version.outputs.next-version }}"
+
+      - name: Push changes
+        uses: ad-m/github-push-action@master
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          branch: ${{ github.ref }}
+          tags: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: "v${{ steps.bump_version.outputs.next-version }}"
+          name: "Release v${{ steps.bump_version.outputs.next-version }}"
+          body_path: CHANGELOG.md
+          draft: false
+          prerelease: false
