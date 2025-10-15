@@ -9,8 +9,10 @@ declare hardware_id
 declare script_directory="/usr/local/bin"
 declare mount_script="/usr/local/bin/mount_devices"
 declare discovery_server_address
+declare debug
 
 discovery_server_address=$(bashio::config 'discovery_server_address')
+debug=$(bashio::config 'debug' || echo "false")
 
 bashio::log.info ""
 bashio::log.info "-----------------------------------------------------------------------"
@@ -18,7 +20,7 @@ bashio::log.info "-------------------- Starting USB/IP Client Add-on -----------
 bashio::log.info "-----------------------------------------------------------------------"
 bashio::log.info ""
 
-# Check if the script directory exists and log details
+# Ensure script directory
 bashio::log.info "Checking if script directory ${script_directory} exists."
 if ! bashio::fs.directory_exists "${script_directory}"; then
     bashio::log.info "Creating script directory at ${script_directory}."
@@ -27,7 +29,7 @@ else
     bashio::log.info "Script directory ${script_directory} already exists."
 fi
 
-# Create or clean the mount script
+# Recreate mount script
 bashio::log.info "Checking if mount script ${mount_script} exists."
 if bashio::fs.file_exists "${mount_script}"; then
     bashio::log.info "Mount script already exists. Removing old script."
@@ -37,69 +39,91 @@ bashio::log.info "Creating new mount script at ${mount_script}."
 touch "${mount_script}" || bashio::exit.nok "Could not create mount script"
 chmod +x "${mount_script}"
 
-# Write initial content to the mount script
-echo '#!/usr/bin/with-contenv bashio' >"${mount_script}"
-echo 'mount -o remount -t sysfs sysfs /sys' >>"${mount_script}"
+# Write header and readiness checks into mount script
+cat >"${mount_script}" <<'EOF'
+#!/usr/bin/with-contenv bashio
+# Generated mount script for USB/IP attachments
+
+# Verify usbip tool exists
+if ! command -v usbip >/dev/null 2>&1; then
+    bashio::log.error "usbip tool not found; please install usbip-utils"
+    exit 1
+fi
+
+# Ensure vhci_hcd present
+if ! lsmod | grep -q '^vhci_hcd\b'; then
+    if ! modprobe vhci_hcd 2>/dev/null; then
+        bashio::log.error "Failed to load vhci_hcd module; usbip attach will not work"
+        exit 1
+    else
+        bashio::log.info "Loaded vhci_hcd kernel module"
+    fi
+else
+    bashio::log.info "vhci_hcd kernel module already loaded"
+fi
+
+EOF
+
 bashio::log.info "Mount script initialization complete."
 
-# Discover available devices (global)
+# Global device discovery logging
 bashio::log.info "Discovering devices from server ${discovery_server_address}."
-if available_devices=$(usbip list -r "${discovery_server_address}" 2>/dev/null); then
-    if [ -z "$available_devices" ]; then
+if device_list=$(usbip list -r "${discovery_server_address}" 2>/dev/null); then
+    if [ -z "$device_list" ]; then
         bashio::log.info "No devices found on server ${discovery_server_address}."
     else
         bashio::log.info "Available devices from ${discovery_server_address}:"
-        echo "$available_devices" | while read -r line; do
-            bashio::log.info "$line"
-        done
+        if [ "${debug}" = "true" ]; then
+            echo "$device_list" | while read -r line; do
+                bashio::log.info "$line"
+            done
+        else
+            # brief summary lines only
+            echo "$device_list" | grep -E '^[[:space:]]*-' | while read -r line; do
+                bashio::log.info "$line"
+            done
+        fi
     fi
 else
     bashio::log.info "Failed to retrieve device list from server ${discovery_server_address}."
 fi
 
-# Loop through configured devices
+# Iterate configured devices
 bashio::log.info "Iterating over configured devices."
 for device in $(bashio::config 'devices | keys'); do
     server_address=$(bashio::config "devices[${device}].server_address")
     bus_id=$(bashio::config "devices[${device}].bus_id")
     hardware_id=$(bashio::config "devices[${device}].hardware_id")
 
-    # Fallback to global discovery address if not provided per-device
     if [ -z "${server_address}" ]; then
         server_address="${discovery_server_address}"
     fi
 
-    # Resolve hardware_id -> bus_id when provided and bus_id empty
+    # Resolve hardware_id -> bus_id when needed
     if [ -n "${hardware_id}" ] && [ -z "${bus_id}" ]; then
         bashio::log.info "Resolving bus ID for hardware ID ${hardware_id} from server ${server_address}"
         if device_list=$(usbip list -r "${server_address}" 2>/dev/null); then
-            # Log raw device list for debugging
-            bashio::log.info "Raw device_list from ${server_address}:"
-            echo "${device_list}" | while read -r l; do bashio::log.info "RAW: $l"; done
+            if [ "${debug}" = "true" ]; then
+                bashio::log.info "Raw device_list from ${server_address}:"
+                echo "${device_list}" | while read -r l; do bashio::log.info "RAW: $l"; done
+            fi
 
-            # Normalize search term (remove non-hex, lowercase)
+            # normalize search
             search=$(echo "${hardware_id}" | tr '[:upper:]' '[:lower:]' | sed 's/[^0-9a-f]//g')
             bashio::log.info "Normalized hardware search term: ${search}"
 
-            # Try robust awk-based resolver first (remembers last-seen bus id)
             resolved_bus_id=$(echo "${device_list}" | awk -v s="${search}" '
-                BEGIN { IGNORECASE = 1 }
-                # capture device header lines that contain busid like "4-3:" or "1-1.2:1.0"
-                /^[[:space:]]*[-]?[[:space:]]*[0-9]+([-.0-9])*:/ {
-                    # the busid is usually in $1; strip trailing colon
+                BEGIN { IGNORECASE = 1; bid = "" }
+                /^[[:space:]]*[0-9]+([-\.0-9])*:/ {
                     bid = $1
                     sub(/:$/,"",bid)
                     next
                 }
                 {
-                    # match parenthesized hex like (1a86:55d4)
                     if (match($0, /\([0-9a-f]{4}:[0-9a-f]{4}\)/,m)) {
-                        hid = tolower(m[0])
-                        gsub(/[()]/,"",hid)
-                        gsub(/[^0-9a-f]/,"",hid)
+                        hid = tolower(m[0]); gsub(/[()]/,"",hid); gsub(/[^0-9a-f]/,"",hid)
                         if (hid == s) { print bid; exit }
                     }
-                    # match USB\VID_xxxx&PID_yyyy style
                     if (match($0, /USB\\VID_[0-9A-F]{4}&PID_[0-9A-F]{4}/,m2)) {
                         line = tolower(m2[0])
                         if (match(line, /vid_([0-9a-f]{4})&pid_([0-9a-f]{4})/, parts)) {
@@ -109,11 +133,12 @@ for device in $(bashio::config 'devices | keys'); do
                     }
                 }
             ')
-            bashio::log.info "LOOOOOooooooook HERE ############ ${resolved_bus_id}"
-            # Fallback to simpler grep-based resolver if awk found nothing
+
             if [ -z "${resolved_bus_id}" ]; then
+                p1="${search:0:4}"
+                p2="${search:4}"
                 resolved_bus_id=$(echo "${device_list}" \
-                  | grep -i -B1 -E "${search:0:4}[: ]*${search:4}|VID_${search:0:4}.*PID_${search:4}" \
+                  | grep -i -E "(${p1}[: ]*${p2}|VID_${p1}.*PID_${p2})" -B1 \
                   | head -n1 | awk '{gsub(/:$/,""); print $1}')
             fi
 
@@ -133,33 +158,58 @@ for device in $(bashio::config 'devices | keys'); do
         continue
     fi
 
-
     bashio::log.info "Adding device from server ${server_address} on bus ${bus_id}"
 
-    # Detach any existing attachments (use standard -r -b flags)
-    bashio::log.info "Detaching device ${bus_id} from server ${server_address} if already attached."
-    echo "/usr/sbin/usbip detach -r ${server_address} -b ${bus_id} >/dev/null 2>&1 || true" >>"${mount_script}"
+    # detach any existing attachments
+    echo "/usr/sbin/usbip detach -r \"${server_address}\" -b \"${bus_id}\" >/dev/null 2>&1 || true" >>"${mount_script}"
 
-    # Attach the device and verify connection
-    bashio::log.info "Attempting to attach device ${bus_id} from server ${server_address}."
-    echo "if /usr/sbin/usbip attach -r ${server_address} -b ${bus_id} 2>/dev/null; then" >>"${mount_script}"
-    echo "    # Wait a moment for the device to be properly attached"
-    echo "    sleep 2" >>"${mount_script}"
-    echo "    # Check if device is actually attached"
-    echo "    if usbip port | grep -q \"Port.*: ${server_address}:${bus_id}\"; then" >>"${mount_script}"
-    echo "        bashio::log.info \"Successfully attached device ${bus_id} from ${server_address}\"" >>"${mount_script}"
-    echo "    else" >>"${mount_script}"
-    echo "        bashio::log.warning \"Device ${bus_id} attachment verified failed - device may not be properly connected\"" >>"${mount_script}"
-    echo "    fi" >>"${mount_script}"
-    echo "else" >>"${mount_script}"
-    echo "    bashio::log.error \"Failed to attach device ${bus_id} from ${server_address}\"" >>"${mount_script}"
-    echo "fi" >>"${mount_script}"
+    # Append attach with retries to mount script
+    cat >>"${mount_script}" <<EOF
+bashio::log.info "Attempting to attach device ${bus_id} from server ${server_address}."
+attempt=1
+max_attempts=3
+attached=0
+while [ \$attempt -le \$max_attempts ]; do
+    if /usr/sbin/usbip attach -r "${server_address}" -b "${bus_id}" 2>/dev/null; then
+        timeout=10
+        step=1
+        elapsed=0
+        while [ \$elapsed -lt \$timeout ]; do
+            if usbip port | grep -q -- "Port.*: ${server_address}:${bus_id}"; then
+                bashio::log.info "Successfully attached device ${bus_id} from ${server_address}"
+                attached=1
+                break
+            fi
+            sleep \$step
+            elapsed=\$((elapsed + step))
+        done
+        if [ \$attached -eq 1 ]; then
+            break
+        else
+            bashio::log.warning "Attach command succeeded but verification failed for ${bus_id}; will retry"
+            /usr/sbin/usbip detach -r "${server_address}" -b "${bus_id}" >/dev/null 2>&1 || true
+        fi
+    else
+        bashio::log.warning "usbip attach command failed for ${bus_id} on ${server_address} (attempt \$attempt)"
+    fi
+    attempt=\$((attempt + 1))
+    sleep \$((2 ** attempt))
 done
 
-# Add final status check
-echo "echo ''" >>"${mount_script}"
-echo "bashio::log.info \"=== Final USB/IP Connection Status ===\"" >>"${mount_script}"
-echo "usbip port" >>"${mount_script}"
-echo "echo ''" >>"${mount_script}"
+if [ \$attached -ne 1 ]; then
+    bashio::log.error "Failed to attach device ${bus_id} from ${server_address} after ${max_attempts} attempts"
+fi
+EOF
+
+done
+
+# Final status check
+cat >>"${mount_script}" <<'EOF'
+echo ''
+bashio::log.info "=== Final USB/IP Connection Status ==="
+usbip port || bashio::log.info "usbip port command failed or returned no entries"
+echo ''
+EOF
 
 bashio::log.info "Device configuration complete. Ready to attach devices."
+bashio::log.info "Ensure server-side usbipd is running and devices are exported on the server."
