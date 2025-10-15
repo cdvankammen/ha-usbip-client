@@ -12,7 +12,7 @@ on:
         type: choice
         options:
           - patch
-          - minor
+          - feature
           - major
 
 jobs:
@@ -39,9 +39,12 @@ jobs:
         id: determine_increment
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "increment=${{ github.event.inputs.version_increment }}" >> $GITHUB_OUTPUT
+            case "${{ github.event.inputs.version_increment }}" in
+              "patch") echo "increment=bug" >> $GITHUB_OUTPUT ;;
+              *) echo "increment=${{ github.event.inputs.version_increment }}" >> $GITHUB_OUTPUT ;;
+            esac
           else
-            echo "increment=patch" >> $GITHUB_OUTPUT
+            echo "increment=bug" >> $GITHUB_OUTPUT
           fi
 
       - name: Bump version
