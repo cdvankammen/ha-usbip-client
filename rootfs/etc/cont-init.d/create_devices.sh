@@ -132,6 +132,7 @@ for device in $(bashio::config 'devices | keys'); do
         bashio::log.info "Skipping device for server ${server_address}: missing bus ID (and could not resolve from hardware ID)"
         continue
     fi
+    #hi
 
     bashio::log.info "Adding device from server ${server_address} on bus ${bus_id}"
 
