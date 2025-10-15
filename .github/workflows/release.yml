@@ -1,5 +1,8 @@
 name: Release
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       version_increment:
@@ -20,19 +23,33 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
       - name: Get current version
         id: version
         run: |
-          current_version=$(jq -r '.version' config.yaml)
+          current_version=$(yq eval '.version' config.yaml)
           echo "Current version: $current_version"
           echo "current=$current_version" >> $GITHUB_OUTPUT
+
+      - name: Determine version increment
+        id: determine_increment
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "increment=${{ github.event.inputs.version_increment }}" >> $GITHUB_OUTPUT
+          else
+            echo "increment=patch" >> $GITHUB_OUTPUT
+          fi
 
       - name: Bump version
         id: bump_version
         uses: christian-draeger/increment-semantic-version@1.1.0
         with:
           current-version: ${{ steps.version.outputs.current }}
-          version-fragment: ${{ github.event.inputs.version_increment }}
+          version-fragment: ${{ steps.determine_increment.outputs.increment }}
 
       - name: Update version in config.yaml
         run: |

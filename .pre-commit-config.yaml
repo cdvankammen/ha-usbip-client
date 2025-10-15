@@ -1,0 +1,16 @@
+repos:
+-   repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.4.0
+    hooks:
+    -   id: check-yaml
+        files: ^(config\.yaml|\.pre-commit-config\.yaml)$
+    -   id: trailing-whitespace
+    -   id: end-of-file-fixer
+-   repo: local
+    hooks:
+    -   id: validate-version
+        name: Validate Version Numbers
+        entry: python .github/scripts/validate_version.py
+        language: python
+        files: ^config\.yaml$
+        additional_dependencies: ['PyYAML>=5.1']
