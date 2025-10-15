@@ -15,7 +15,7 @@ discovery_server_address=$(bashio::config 'discovery_server_address' || echo "")
 debug=$(bashio::config 'debug' || echo "false")
 
 log() { bashio::log.info "$1"; }
-log_debug() { [ "${debug}" = "true" ] && bashio::log.info "DEBUG: $1"; }
+log_debug() { [ "${debug}" = "true" ] && bashio::log.debug "$1"; }
 log_warn() { bashio::log.warning "$1"; }
 log_err() { bashio::log.error "$1"; }
 
@@ -186,45 +186,44 @@ for device in $(bashio::config 'devices | keys'); do
     # Detach any existing attachments (append safe-quoted line)
     append_mount "/usr/sbin/usbip detach -r \"${server_address}\" -b \"${bus_id}\" >/dev/null 2>&1 || true"
 
-    # Append attach block with retries and verification
-    cat >>"${mount_script}" <<MOUNT_BLOCK
+    # Append attach block with retries and verification (write verbatim, no outer expansion)
+    cat >>"${mount_script}" <<'MOUNT_BLOCK'
 bashio::log.info "Attempting to attach device ${bus_id} from server ${server_address}."
 attempt=1
 max_attempts=3
 attached=0
-while [ \$attempt -le \$max_attempts ]; do
+while [ $attempt -le $max_attempts ]; do
     if /usr/sbin/usbip attach -r "${server_address}" -b "${bus_id}" 2>/dev/null; then
         timeout=10
         interval=1
         elapsed=0
-        while [ \$elapsed -lt \$timeout ]; do
+        while [ $elapsed -lt $timeout ]; do
             if usbip port | grep -q -- "Port.*: ${server_address}:${bus_id}"; then
                 bashio::log.info "Successfully attached device ${bus_id} from ${server_address}"
                 attached=1
                 break
             fi
-            sleep \$interval
-            elapsed=\$((elapsed + interval))
+            sleep $interval
+            elapsed=$((elapsed + interval))
         done
-        if [ \$attached -eq 1 ]; then
+        if [ $attached -eq 1 ]; then
             break
         else
             bashio::log.warning "Attach succeeded but verification failed for ${bus_id}; detaching and retrying"
             /usr/sbin/usbip detach -r "${server_address}" -b "${bus_id}" >/dev/null 2>&1 || true
         fi
     else
-        bashio::log.warning "usbip attach failed for ${bus_id} on ${server_address} (attempt \$attempt)"
+        bashio::log.warning "usbip attach failed for ${bus_id} on ${server_address} (attempt $attempt)"
     fi
-    attempt=\$((attempt + 1))
-    backoff=\$((2 ** attempt))
-    if [ \$backoff -gt 30 ]; then backoff=30; fi
-    sleep \$backoff
+    attempt=$((attempt + 1))
+    backoff=$((2 ** attempt))
+    if [ $backoff -gt 30 ]; then backoff=30; fi
+    sleep $backoff
 done
 
-if [ \$attached -ne 1 ]; then
+if [ $attached -ne 1 ]; then
     bashio::log.error "Failed to attach device ${bus_id} from ${server_address} after ${max_attempts} attempts"
 fi
-
 MOUNT_BLOCK
 
 done
