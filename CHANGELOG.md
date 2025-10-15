@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.1.6994 - 2025-10-15
+
+### [0.1.6994] - Update release.yml
+
+For full changelog, see [GitHub releases](https://github.com/cdvankammen/ha-usbip-client/releases)
+
 ## [0.1.3] - 2024-12-21
 
 ### Changed
@@ -26,6 +32,7 @@ All notable changes to this project will be documented in this file.
 ### Added
 
 - Initial release.
+
 
 ---
 
