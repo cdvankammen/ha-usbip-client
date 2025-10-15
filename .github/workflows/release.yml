@@ -79,7 +79,8 @@ jobs:
       - name: Update version in config.yaml
         run: |
           NEW_VERSION="${{ steps.bump_version.outputs.next-version }}"
-          sed -i "s/version: \".*\"/version: \"$NEW_VERSION\"/" config.yaml
+          # Handle both quoted and unquoted versions
+          sed -i "s/version: .*$/version: \"$NEW_VERSION\"/" config.yaml
 
       - name: Update CHANGELOG.md
         uses: stefanzweifel/changelog-updater-action@v1
