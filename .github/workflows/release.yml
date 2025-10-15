@@ -1,121 +1,194 @@
+########################################
+# Workflow Name and Description
+########################################
 name: Release
-# This workflow handles automatic version incrementing and release creation
+# This workflow automatically handles version management and releases
+# It can be triggered either by pushing to main or manually
 
+########################################
+# Workflow Triggers
+########################################
 on:
-  # Triggers on push to main branch
+  # Automatically run when code is pushed to main branch
   push:
     branches:
       - main
-  # Allows manual triggering with version choice
+
+  # Allow manual execution from GitHub UI with version choice
   workflow_dispatch:
     inputs:
+      # Define the version increment type input
       version_increment:
         description: 'Version increment type'
         required: true
         default: 'patch'
         type: choice
         options:
-          # User-friendly version increment options
-          # These will be mapped to the action's expected values:
-          # - patch -> bug (for small fixes)
-          # - feature -> feature (for minor version bumps)
-          # - major -> major (for breaking changes)
+          # User-friendly version increment options that map to semantic versioning:
+          # patch -> bug     (0.0.X) For backwards-compatible bug fixes
+          # feature -> feature (0.X.0) For new backwards-compatible features
+          # major -> major    (X.0.0) For breaking changes
           - patch
           - feature
           - major
 
+########################################
+# Job Definition
+########################################
 jobs:
   release:
+    # Use GitHub-hosted Ubuntu runner
     runs-on: ubuntu-latest
     steps:
-      # Checkout code with full history for proper versioning
+      ########################################
+      # Step 1: Checkout Repository
+      ########################################
+      # Clone the repository with full history for proper versioning
       - uses: actions/checkout@v3
         with:
-          fetch-depth: 0
+          fetch-depth: 0    # 0 means fetch all history
 
-      # Install yq for YAML parsing
-      # We use yq instead of jq because our version is in a YAML file
+      ########################################
+      # Step 2: Install Required Tools
+      ########################################
+      # Install yq (YAML parser) for reading config.yaml
       - name: Install yq
         run: |
+          # Download yq binary directly to /usr/local/bin
           sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          # Make the binary executable
           sudo chmod +x /usr/local/bin/yq
 
-      # Extract current version from config.yaml
-      # yq properly handles YAML format, whether version is quoted or not
+      ########################################
+      # Step 3: Read Current Version
+      ########################################
       - name: Get current version
-        id: version
+        id: version    # ID used to reference this step later
         run: |
+          # Extract version field from config.yaml using yq
+          # yq handles both quoted and unquoted YAML values
           current_version=$(yq eval '.version' config.yaml)
+
+          # Log the version for debugging
           echo "Current version: $current_version"
+
+          # Save to GitHub Actions output for use in later steps
+          # This creates steps.version.outputs.current
           echo "current=$current_version" >> $GITHUB_OUTPUT
 
-      # Map user-friendly version increments to christian-draeger/increment-semantic-version values
-      # The action expects: major, feature, bug, alpha, beta, pre, rc
-      # We map: patch -> bug, feature -> feature, major -> major
+      ########################################
+      # Step 4: Determine Version Increment Type
+      ########################################
       - name: Determine version increment
-        id: determine_increment
+        id: determine_increment    # ID for referencing this step
         run: |
+          # Check if this is a manual run (workflow_dispatch)
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # Convert user-friendly terms to action's expected values
             case "${{ github.event.inputs.version_increment }}" in
+              # Map 'patch' to 'bug' as required by the version increment action
               "patch") echo "increment=bug" >> $GITHUB_OUTPUT ;;
+              # Keep other values (feature, major) as is
               *) echo "increment=${{ github.event.inputs.version_increment }}" >> $GITHUB_OUTPUT ;;
             esac
           else
+            # For automatic runs (push to main), default to bug/patch increment
             echo "increment=bug" >> $GITHUB_OUTPUT
           fi
 
-      # Use the semantic version increment action
-      # This action expects specific fragment types: major, feature, bug, alpha, beta, pre, rc
-      # That's why we mapped 'patch' to 'bug' in the previous step
+      ########################################
+      # Step 5: Calculate New Version Number
+      ########################################
+      # Use semantic version increment action to calculate the next version
       - name: Bump version
-        id: bump_version
+        id: bump_version    # ID to reference the new version later
         uses: christian-draeger/increment-semantic-version@1.1.0
         with:
+          # Get current version from previous step's output
           current-version: ${{ steps.version.outputs.current }}
+          # Get increment type (bug/feature/major) from previous step
           version-fragment: ${{ steps.determine_increment.outputs.increment }}
 
-      # Update the version in config.yaml with the new version
-      # Note: We ensure version is always quoted in the YAML file
+      ########################################
+      # Step 6: Update Version in config.yaml
+      ########################################
       - name: Update version in config.yaml
         run: |
+          # Get the new version calculated by the previous step
           NEW_VERSION="${{ steps.bump_version.outputs.next-version }}"
-          # Handle both quoted and unquoted versions
+
+          # Update version in config.yaml
+          # This sed command:
+          # - Matches any version format (quoted or unquoted)
+          # - Replaces with new quoted version
+          # - Ensures consistent format
           sed -i "s/version: .*$/version: \"$NEW_VERSION\"/" config.yaml
 
+      ########################################
+      # Step 7: Update Changelog
+      ########################################
       - name: Update CHANGELOG.md
         uses: stefanzweifel/changelog-updater-action@v1
         with:
+          # Pass the new version to the changelog updater
           latest-version: ${{ steps.bump_version.outputs.next-version }}
+          # Format the release notes with version and commit message
           release-notes: |
             ## [${{ steps.bump_version.outputs.next-version }}] - ${{ github.event.head_commit.message }}
 
             For full changelog, see [GitHub releases](${{ github.event.repository.html_url }}/releases)
 
+      ########################################
+      # Step 8: Commit Version Updates
+      ########################################
       - name: Commit changes
         run: |
+          # Configure git with GitHub Actions bot identity
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
+
+          # Stage the modified files
           git add config.yaml CHANGELOG.md
+
+          # Only create commit if there are changes
           if ! git diff --cached --quiet; then
+            # Create commit with version bump message
             git commit -m "chore: bump version to ${{ steps.bump_version.outputs.next-version }}"
-            # Delete tag if it exists and create a new one
+
+            # Handle existing tags
+            # Delete local tag if it exists (|| true prevents error if tag doesn't exist)
             git tag -d "v${{ steps.bump_version.outputs.next-version }}" 2>/dev/null || true
+            # Delete remote tag if it exists
             git push origin :refs/tags/"v${{ steps.bump_version.outputs.next-version }}" 2>/dev/null || true
+            # Create new annotated tag
             git tag -a "v${{ steps.bump_version.outputs.next-version }}" -m "Release v${{ steps.bump_version.outputs.next-version }}"
           fi
 
+      ########################################
+      # Step 9: Push Changes to GitHub
+      ########################################
       - name: Push changes
         uses: ad-m/github-push-action@master
         with:
+          # Use automatically provided GitHub token for authentication
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          # Push to the current branch
           branch: ${{ github.ref }}
+          # Include tags in the push
           tags: true
 
+      ########################################
+      # Step 10: Create GitHub Release
+      ########################################
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
+          # Set the tag name for the release
           tag_name: "v${{ steps.bump_version.outputs.next-version }}"
+          # Set the release title
           name: "Release v${{ steps.bump_version.outputs.next-version }}"
+          # Use the updated CHANGELOG.md as release notes
           body_path: CHANGELOG.md
-          draft: false
-          prerelease: false
+          # Release settings
+          draft: false        # Publish immediately
+          prerelease: false   # Mark as full release
