@@ -1,8 +1,12 @@
 name: Release
+# This workflow handles automatic version incrementing and release creation
+
 on:
+  # Triggers on push to main branch
   push:
     branches:
       - main
+  # Allows manual triggering with version choice
   workflow_dispatch:
     inputs:
       version_increment:
@@ -11,6 +15,11 @@ on:
         default: 'patch'
         type: choice
         options:
+          # User-friendly version increment options
+          # These will be mapped to the action's expected values:
+          # - patch -> bug (for small fixes)
+          # - feature -> feature (for minor version bumps)
+          # - major -> major (for breaking changes)
           - patch
           - feature
           - major
@@ -19,15 +28,20 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
+      # Checkout code with full history for proper versioning
       - uses: actions/checkout@v3
         with:
           fetch-depth: 0
 
+      # Install yq for YAML parsing
+      # We use yq instead of jq because our version is in a YAML file
       - name: Install yq
         run: |
           sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
 
+      # Extract current version from config.yaml
+      # yq properly handles YAML format, whether version is quoted or not
       - name: Get current version
         id: version
         run: |
@@ -35,6 +49,9 @@ jobs:
           echo "Current version: $current_version"
           echo "current=$current_version" >> $GITHUB_OUTPUT
 
+      # Map user-friendly version increments to christian-draeger/increment-semantic-version values
+      # The action expects: major, feature, bug, alpha, beta, pre, rc
+      # We map: patch -> bug, feature -> feature, major -> major
       - name: Determine version increment
         id: determine_increment
         run: |
@@ -47,6 +64,9 @@ jobs:
             echo "increment=bug" >> $GITHUB_OUTPUT
           fi
 
+      # Use the semantic version increment action
+      # This action expects specific fragment types: major, feature, bug, alpha, beta, pre, rc
+      # That's why we mapped 'patch' to 'bug' in the previous step
       - name: Bump version
         id: bump_version
         uses: christian-draeger/increment-semantic-version@1.1.0
@@ -54,6 +74,8 @@ jobs:
           current-version: ${{ steps.version.outputs.current }}
           version-fragment: ${{ steps.determine_increment.outputs.increment }}
 
+      # Update the version in config.yaml with the new version
+      # Note: We ensure version is always quoted in the YAML file
       - name: Update version in config.yaml
         run: |
           NEW_VERSION="${{ steps.bump_version.outputs.next-version }}"
