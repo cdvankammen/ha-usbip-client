@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.1.6998 - 2025-10-15
+
+### [0.1.6998] - Merge branch 'main' of https://github.com/cdvankammen/ha-usbip-client
+
+For full changelog, see [GitHub releases](https://github.com/cdvankammen/ha-usbip-client/releases)
+
 ## 0.1.6997 - 2025-10-15
 
 ### [0.1.6997] - Merge branch 'main' of https://github.com/cdvankammen/ha-usbip-client
