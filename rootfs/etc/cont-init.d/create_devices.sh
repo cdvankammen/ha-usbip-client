@@ -139,9 +139,26 @@ for device in $(bashio::config 'devices | keys'); do
     bashio::log.info "Detaching device ${bus_id} from server ${server_address} if already attached."
     echo "/usr/sbin/usbip detach -r ${server_address} -b ${bus_id} >/dev/null 2>&1 || true" >>"${mount_script}"
 
-    # Attach the device (use standard -r -b flags)
-    bashio::log.info "Attaching device ${bus_id} from server ${server_address}."
-    echo "/usr/sbin/usbip attach -r ${server_address} -b ${bus_id} >/dev/null 2>&1 || true" >>"${mount_script}"
+    # Attach the device and verify connection
+    bashio::log.info "Attempting to attach device ${bus_id} from server ${server_address}."
+    echo "if /usr/sbin/usbip attach -r ${server_address} -b ${bus_id} 2>/dev/null; then" >>"${mount_script}"
+    echo "    # Wait a moment for the device to be properly attached"
+    echo "    sleep 2" >>"${mount_script}"
+    echo "    # Check if device is actually attached"
+    echo "    if usbip port | grep -q \"Port.*: ${server_address}:${bus_id}\"; then" >>"${mount_script}"
+    echo "        bashio::log.info \"Successfully attached device ${bus_id} from ${server_address}\"" >>"${mount_script}"
+    echo "    else" >>"${mount_script}"
+    echo "        bashio::log.warning \"Device ${bus_id} attachment verified failed - device may not be properly connected\"" >>"${mount_script}"
+    echo "    fi" >>"${mount_script}"
+    echo "else" >>"${mount_script}"
+    echo "    bashio::log.error \"Failed to attach device ${bus_id} from ${server_address}\"" >>"${mount_script}"
+    echo "fi" >>"${mount_script}"
 done
- 
+
+# Add final status check
+echo "echo ''" >>"${mount_script}"
+echo "bashio::log.info \"=== Final USB/IP Connection Status ===\"" >>"${mount_script}"
+echo "usbip port" >>"${mount_script}"
+echo "echo ''" >>"${mount_script}"
+
 bashio::log.info "Device configuration complete. Ready to attach devices."
