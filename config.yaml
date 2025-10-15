@@ -30,6 +30,9 @@ options:
       bus_id: "1-1.1.3"
     - server_address: "192.168.1.44"
       hardware_id: "1234:ABCD"
+  tailscale:
+    auth_key: ""        # set by user in Add-on UI (leave empty in repo)
+    hostname: ""        # optional friendly hostname for the node
 schema:
   log_level: list(trace|debug|info|notice|warning|error|fatal)
   discovery_server_address: str
@@ -37,3 +40,10 @@ schema:
     - server_address: str
       bus_id: str?
       hardware_id: str?
+  tailscale:
+    type: object
+    properties:
+      auth_key:
+        type: string
+      hostname:
+        type: string

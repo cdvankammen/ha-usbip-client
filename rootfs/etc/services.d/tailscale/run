@@ -1,0 +1,10 @@
+#!/usr/bin/with-contenv bashio
+# Ensure state dir exists and run tailscaled supervised by s6
+bashio::log.info "Starting tailscaled service"
+
+mkdir -p /var/lib/tailscale
+chown root:root /var/lib/tailscale
+chmod 700 /var/lib/tailscale
+
+# If kernel networking/tun is unavailable, you can add --tun=userspace-networking
+exec /usr/bin/tailscaled --state=/var/lib/tailscale/tailscaled.state
